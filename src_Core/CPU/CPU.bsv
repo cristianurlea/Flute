@@ -1143,7 +1143,7 @@ module mkCPU (CPU_IFC);
 
    rule rl_count_cycle;
       rg_cycle <= rg_cycle + 1;
-      if (rg_cycle == 2500) begin
+      if (rg_cycle == 1000) begin
          $display (" TRIGGER WARNING ");
          cms_halt_cpu_x <= 1;
          // soc_top.cms_ifc.halt_cpu(1);
