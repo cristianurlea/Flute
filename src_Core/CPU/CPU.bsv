@@ -132,6 +132,11 @@ import StatCounters::*;
 typedef enum {CPU_RESET1,
 	      CPU_RESET2,
 
+`ifdef INCLUDE_CMS_CONTROL
+	      CPU_CMS_PAUSING,      
+            CPU_CMS_RESUMING,      
+`endif
+
 `ifdef INCLUDE_GDB_CONTROL
 	      CPU_GDB_PAUSING,      // On GDB breakpoint, while waiting for fence completion
 `endif
@@ -332,6 +337,12 @@ module mkCPU (CPU_IFC);
 
    // ----------------
    // Communication to/from External debug module
+
+`ifdef INCLUDE_CMS_CONTROL
+      FIFOF #(Bool)  f_cms_run_halt_reqs <- mkFIFOF;
+
+      Bool f_cms_run_halt_reqs_empty = (! f_cms_run_halt_reqs.notEmpty);
+`endif
 
 `ifdef INCLUDE_GDB_CONTROL
 
@@ -784,11 +795,14 @@ module mkCPU (CPU_IFC);
    // Debugger stop and step should only happen on architectural instructions
    Bool stop_step_halt = stage1_has_arch_instr && stop_step_req;
 
+   
    // halt CPU when continuous monitoring system (CMS) storage is full
-   Reg #(Bit#(1)) cms_halt_cpu <- mkRegU;
+   Reg #(Bit#(1)) cms_halt_cpu_x <- mkRegU;
+   Reg #(Bit#(64)) rg_cycle <- mkReg (0);
+   Bool stop_cms_halt_cpu = ( cms_halt_cpu_x == 1 );
 
    // Halting conditions
-   Bool halting = (stop_step_halt || mip_cmd_needed || (interrupt_pending && stage1_has_arch_instr || unpack(cms_halt_cpu)));
+   Bool halting = (stop_cms_halt_cpu || stop_step_halt || mip_cmd_needed || (interrupt_pending && stage1_has_arch_instr));
    // Stage1 can halt only when actually contains an instruction, downstream is
    // empty and, if a branch misprediction, StageF is able to be redirected.
    Bool stage1_halted = (   halting
@@ -803,6 +817,7 @@ module mkCPU (CPU_IFC);
    Bool stage1_send_mip_cmd   = stage1_halted && mip_cmd_needed;
    Bool stage1_take_interrupt = stage1_halted && (! mip_cmd_needed) && interrupt_pending && stage1_has_arch_instr;
    Bool stage1_stop           = stage1_halted && (! mip_cmd_needed) && (! (interrupt_pending && stage1_has_arch_instr));
+   Bool stage1_cms_stop       = stage1_halted && stop_cms_halt_cpu;
 
    // ================================================================
    // Every time an instruction finishes stage 1
@@ -885,7 +900,6 @@ module mkCPU (CPU_IFC);
 		 && (! pipe_has_nonpipe)
 		 && (! stage1_halted)
 		 && f_run_halt_reqs_empty 
-            //  && (! halting) // WARNING: PRO GAMER MOVE BY MICHAL
              );
 
       if (cur_verbosity > 1) $display ("%0d: %m.rl_pipe", mcycle);
@@ -1090,7 +1104,6 @@ module mkCPU (CPU_IFC);
 			   && (stage3.out.ostatus == OSTATUS_EMPTY)
 			   && (stage2.out.ostatus == OSTATUS_NONPIPE)
 			   && f_run_halt_reqs_empty
-                  //    && (! halting) // WARNING: PRO GAMER MOVE BY MICHAL
                      );
       if (cur_verbosity > 1)
 	 $display ("%0d: %m.rl_stage2_nonpipe", mcycle);
@@ -1121,11 +1134,24 @@ module mkCPU (CPU_IFC);
    // Stage1: nonpipe traps (except BREAKs that enter Debug Mode)
 
 `ifdef INCLUDE_GDB_CONTROL
-   Bool break_into_Debug_Mode = (   (stage1.out.trap_info.exc_code == exc_code_BREAKPOINT)
+   Bool break_into_Debug_Mode = ( (stage1.out.trap_info.exc_code == exc_code_BREAKPOINT)
 				 && csr_regfile.dcsr_break_enters_debug (rg_cur_priv));
 `else
    Bool break_into_Debug_Mode = False;
 `endif
+
+
+   rule rl_count_cycle;
+      rg_cycle <= rg_cycle + 1;
+      if (rg_cycle == 2500) begin
+         $display (" TRIGGER WARNING ");
+         cms_halt_cpu_x <= 1;
+         // soc_top.cms_ifc.halt_cpu(1);
+         // reset soc_top
+         // soc_top.
+      end
+   endrule
+
 
    rule rl_stage1_trap (   (rg_state == CPU_RUNNING)
 			&& (! halting)
@@ -1136,7 +1162,6 @@ module mkCPU (CPU_IFC);
 			&& (! break_into_Debug_Mode)
 			&& (stageF.out.ostatus != OSTATUS_BUSY)
 			&& f_run_halt_reqs_empty
-                  // && (! halting) // WARNING: PRO GAMER MOVE BY MICHAL
                   );
       if (cur_verbosity > 1) $display ("%0d: %m.rl_stage1_trap", mcycle);
 
@@ -1162,7 +1187,6 @@ module mkCPU (CPU_IFC);
    rule rl_trap ((rg_state == CPU_TRAP)
 		 && (stageF.out.ostatus != OSTATUS_BUSY)
 		 && f_run_halt_reqs_empty
-            //  && (! halting) // WARNING: PRO GAMER MOVE BY MICHAL
              );
 `ifdef ISA_CHERI
       let epcc     = rg_trap_info.epcc;
@@ -1294,7 +1318,7 @@ module mkCPU (CPU_IFC);
    let events = generateHPMVector(ev_struct);
 
    (* fire_when_enabled, no_implicit_conditions *)
-   rule rl_send_perf_evts; //( //  (! halting) // WARNING: PRO GAMER MOVE BY MICHAL);
+   rule rl_send_perf_evts;
       csr_regfile.send_performance_events (events);
       crg_slave_evts [0] <= unpack (0);
       crg_master_evts [0] <= unpack (0);
@@ -1344,7 +1368,6 @@ module mkCPU (CPU_IFC);
 
    rule rl_stage1_SCR_W_2 (   (rg_state == CPU_SCR_W_2)
 			   && f_run_halt_reqs_empty
-                  //    && (! halting) // WARNING: PRO GAMER MOVE BY MICHAL
                      );
       if (cur_verbosity > 1) $display ("%0d: %m.rl_stage1_SCR_W_2", mcycle);
 
@@ -1640,7 +1663,6 @@ module mkCPU (CPU_IFC);
 
    rule rl_stage1_CSRR_S_or_C_2 (   (rg_state == CPU_CSRR_S_or_C_2)
 				 && f_run_halt_reqs_empty
-                        //  && (! halting) // WARNING: PRO GAMER MOVE BY MICHAL
                          );
       if (cur_verbosity > 1) $display ("%0d: %m.rl_stage1_CSRR_S_or_C_2", mcycle);
 
@@ -1748,7 +1770,6 @@ module mkCPU (CPU_IFC);
    rule rl_stage1_restart_after_csrrx (   (rg_state == CPU_CSRRX_RESTART)
 				       && (stageF.out.ostatus != OSTATUS_BUSY)
 				       && f_run_halt_reqs_empty
-                              //  && (! halting) // WARNING: PRO GAMER MOVE BY MICHAL
                                );
       if (cur_verbosity > 1)
 	 $display ("%0d: %m.rl_stage1_restart_after_csrrx", mcycle);
@@ -1882,7 +1903,6 @@ module mkCPU (CPU_IFC);
 
    rule rl_finish_FENCE_I (   (rg_state == CPU_FENCE_I)
 			   && f_run_halt_reqs_empty
-                  //    && (! halting) // WARNING: PRO GAMER MOVE BY MICHAL
                      );
       if (cur_verbosity > 1) $display ("%0d: %m.rl_finish_FENCE_I", mcycle);
 
@@ -2056,7 +2076,6 @@ module mkCPU (CPU_IFC);
 
    rule rl_finish_SFENCE_VMA (   (rg_state == CPU_SFENCE_VMA)
 			      && f_run_halt_reqs_empty
-                        // && (! halting) // WARNING: PRO GAMER MOVE BY MICHAL
                         );
       if (cur_verbosity > 1) $display ("%0d: %m.rl_finish_SFENCE_VMA", mcycle);
 
@@ -2137,7 +2156,6 @@ module mkCPU (CPU_IFC);
 			   || stop_step_req)
 		       && (stageF.out.ostatus != OSTATUS_BUSY)
 		       && f_run_halt_reqs_empty
-                  //  && (! halting) // WARNING: PRO GAMER MOVE BY MICHAL
                    );
       if (cur_verbosity > 1)
 	 $display ("%0d: %m.rl_WFI_resume", mcycle);
@@ -2158,7 +2176,6 @@ module mkCPU (CPU_IFC);
    rule rl_reset_from_WFI (   (rg_state == CPU_WFI_PAUSED)
 			   && f_reset_reqs.notEmpty
 			   && f_run_halt_reqs_empty
-                  //    && (! halting) // WARNING: PRO GAMER MOVE BY MICHAL
                      );
       if (cur_verbosity > 1) $display ("%0d: %m.rl_reset_from_WFI", mcycle);
 
@@ -2184,8 +2201,71 @@ module mkCPU (CPU_IFC);
    // Not setting tval, as we are breaking to the debugger.
    // TODO: Does the spec say anything about this?
 
+   rule rl_trap_cms_pausing  (
+                              stage1_cms_stop 
+                              && (rg_state == CPU_RUNNING)
+                              // && f_cms_run_halt_reqs_empty
+                            );
+
+      $display (" TRIGGER WARNING 2");
+      let pcc   = stage1.out.data_to_stage2.pcc;
+      let instr = stage1.out.data_to_stage2.instr;
+      // csr_regfile.write_dcsr_cause_priv (DCSR_CAUSE_EBREAK, rg_cur_priv);
+
+      rg_next_pcc <= toCapPipe(stage1.out.data_to_stage2.pcc);
+      csr_regfile.write_dpcc (toCapPipe(pcc));  // Where we'll resume on 'continue'
+
+      rg_state <= CPU_CMS_PAUSING;
+
+      // Flush both caches -- using the same interface as that used by FENCE_I
+      near_mem.server_fence_i.request.put (?);
+      // f_cms_run_halt_reqs.enq (False);
+   endrule: rl_trap_cms_pausing
+
+   rule rl_trap_cms_flush_finish (
+                                    stage1_cms_stop 
+                                    && (rg_state == CPU_CMS_PAUSING) 
+                                    // && f_cms_run_halt_reqs_empty
+                                 );
+
+      $display (" TRIGGER WARNING 3");
+      let ack <- near_mem.server_fence_i.response.get;
+      rg_state <= CPU_CMS_RESUMING;
+
+      // Notify debugger that we've halted
+      // f_cms_run_halt_reqs.enq (False);
+
+      if (cur_verbosity > 1)
+	 $display ("%0d: %m.rl_BREAK_cache_flush_finish", mcycle);
+   endrule
+
+   rule rl_trap_cms_resuming (
+                                    stage1_cms_stop 
+                                    && (rg_state == CPU_CMS_RESUMING) 
+                                    // && f_cms_run_halt_reqs_empty
+                                 );
+
+      $display (" TRIGGER WARNING :: RSUMING");
+      cms_halt_cpu_x <= 0;
+
+      `ifdef ISA_CHERI
+      let dpcc = csr_regfile.read_dpcc;
+      `else
+            let dpc = csr_regfile.read_dpc;
+      `endif
+            fa_restart_from_halt (
+      `ifdef ISA_CHERI
+                        cast(dpcc)
+      `else
+                        dpc
+      `endif
+            );
+
+   endrule
+
+      
 `ifdef INCLUDE_GDB_CONTROL
-   rule rl_trap_BREAK_to_Debug_Mode (   (rg_state == CPU_RUNNING)
+   rule rl_trap_BREAK_to_Debug_Mode ((rg_state == CPU_RUNNING)
 				     && (! halting)
 				     && (stage3.out.ostatus == OSTATUS_EMPTY)
 				     && (stage2.out.ostatus == OSTATUS_EMPTY)
@@ -2193,7 +2273,8 @@ module mkCPU (CPU_IFC);
 				     && (stage1.out.control == CONTROL_TRAP)
 				     && (stageF.out.ostatus != OSTATUS_BUSY)
 				     && break_into_Debug_Mode
-				     && f_run_halt_reqs_empty);
+				     && f_run_halt_reqs_empty
+                             );
       if (cur_verbosity > 1) $display ("%0d: %m.rl_trap_BREAK_to_Debug_Mode", mcycle);
 
 `ifdef ISA_CHERI
@@ -2203,7 +2284,7 @@ module mkCPU (CPU_IFC);
 `endif
       let instr = stage1.out.data_to_stage2.instr;
 
-      //$display ("%0d: %m.rl_trap_BREAK_to_Debug_Mode: PC 0x%08h instr 0x%08h", mcycle, pc, instr);
+      $display ("%0d: %m.rl_trap_BREAK_to_Debug_Mode: PC 0x%08h instr 0x%08h", mcycle, pcc, instr);
       if (cur_verbosity > 1)
 	 $display ("    Flushing caches");
 
@@ -2228,7 +2309,6 @@ module mkCPU (CPU_IFC);
    // on entering CPU_GDB_PAUSING state
 
    rule rl_BREAK_cache_flush_finish ((rg_state == CPU_GDB_PAUSING) && f_run_halt_reqs_empty
-                        // && (! halting) // WARNING: PRO GAMER MOVE BY MICHAL
                         );
       let ack <- near_mem.server_fence_i.response.get;
       rg_state <= CPU_DEBUG_MODE;
@@ -2244,7 +2324,6 @@ module mkCPU (CPU_IFC);
    // Reset from Debug Module
 
    rule rl_reset_from_Debug_Module (f_reset_reqs.notEmpty && (rg_state != CPU_RESET1)
-                  // && (! halting) // WARNING: PRO GAMER MOVE BY MICHAL
                   );
       $display ("%0d: %m.rl_reset_from_Debug_Module", mcycle);
       rg_state <= CPU_RESET1;
@@ -2261,7 +2340,6 @@ module mkCPU (CPU_IFC);
 			     && (rg_state == CPU_RUNNING)
 			     && stage1_take_interrupt
 			     && (stageF.out.ostatus != OSTATUS_BUSY)
-                  //      && (! halting) // WARNING: PRO GAMER MOVE BY MICHAL
                        );
       if (cur_verbosity > 1) $display ("%0d: %m.rl_stage1_interrupt", mcycle);
 
@@ -2368,6 +2446,7 @@ module mkCPU (CPU_IFC);
 			    dpc
 `endif
 			   );
+                     
 
       // Notify debugger that we've started running
       f_run_halt_rsps.enq (True);
@@ -2662,7 +2741,7 @@ module mkCPU (CPU_IFC);
 
    interface ContinuousMonitoring_IFC cms_ifc;
       method Action halt_cpu(Bit#(1) state);
-            cms_halt_cpu <= state; 
+            cms_halt_cpu_x <= state; 
       endmethod
 
       method WordXL pc; 
@@ -2993,28 +3072,7 @@ module mkCPU (CPU_IFC);
 	// method Bit#(Report_Width) tgc_evt_READ;
       //       return tag_cache_evts.evt_READ;
       // endmethod
-	// method Bit#(Report_Width) tgc_evt_READ_MISS;
-      //       return tag_cache_evts.evt_READ_MISS;
-      // endmethod
-	// method Bit#(Report_Width) tgc_evt_EVICT;
-      //       return tag_cache_evts.evt_EVICT;
-      // endmethod
-	// method Bit#(Report_Width) tgc_evt_SET_TAG_WRITE;
-      //       return tag_cache_evts.evt_SET_TAG_WRITE;
-      // endmethod
-	// method Bit#(Report_Width) tgc_evt_SET_TAG_READ;
-      //       return tag_cache_evts.evt_SET_TAG_READ;
-      // endmethod
-
-      //method Bool stageD_valid;
-      //      let rule_pipe_fire = ((rg_state == CPU_RUNNING) && (! pipe_is_empty) && (! pipe_has_nonpipe) && f_run_halt_reqs_empty);
-
-      //      Bool stage1_full = (stage1.out.ostatus != OSTATUS_EMPTY);
-      //      return rule_pipe_fire && (stageD.out.ostatus == OSTATUS_PIPE);
-      //endmethod
-      //method Instr stageD_instr; 
-      //      return stageD.out.data_to_stage1.instr;
-      //endmethod
+	// method Bit#(Report_Width) tgc_evt_READ_MISS;soc_top.cms_ifc.halt_cpu(1);
       //method WordXL stageD_pc; 
       //      return stageD.out.data_to_stage1.fetch_addr;
       //endmethod

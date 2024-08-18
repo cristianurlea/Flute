@@ -56,6 +56,7 @@ import AXI4 :: *;
 import SoC_Map :: *;
 
 import Near_Mem_IFC :: *;    // For Wd_{Id,Addr,Data,User}_Dma
+import ContinuousMonitoring_IFC :: *;
 
 // ================================================================
 // Top-level module.
@@ -84,12 +85,18 @@ module mkPre_Top_HW_Side(Flute_RVFI_DII_Server);
    // Reg #(Bit#(64)) rg_cycle <- mkReg (0);
    // Reset rst_n <- exposeCurrentReset;
 
+   // Reg #(Bit#(1)) cms_halt_cpu <- mkRegU;
+   // mkConnection(soc_top.cms_halt_cpu, cms_halt_cpu);
+
+   
    // rule rl_count_cycle;
    //    rg_cycle <= rg_cycle + 1;
-   //    if (rg_cycle == 40) begin
-   //       rst_n = False;
+   //    if (rg_cycle == 100) begin
+   //       $display (" TRIGGER WARNING ");
+   //       // cms_halt_cpu <= True;
+   //       // soc_top.cms_ifc.halt_cpu(1);
    //       // reset soc_top
-   //       soc_top.
+   //       // soc_top.
    //    end
    // endrule
 
